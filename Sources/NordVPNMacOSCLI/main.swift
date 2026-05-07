@@ -110,11 +110,6 @@ func appleScriptString(_ value: String) -> String {
 }
 
 func runAsAdministrator(_ executable: String, _ arguments: [String]) throws {
-    let sudoCheck = try run("/usr/bin/sudo", ["-n", executable] + arguments)
-    if sudoCheck.status == 0 {
-        return
-    }
-
     let command = ([executable] + arguments).map(shellQuoted).joined(separator: " ")
     let prompt = "nordvpn-macos needs administrator access to manage OpenVPN."
     let script = "do shell script \(appleScriptString(command)) with administrator privileges with prompt \(appleScriptString(prompt))"
@@ -122,6 +117,15 @@ func runAsAdministrator(_ executable: String, _ arguments: [String]) throws {
     if result.status != 0 {
         throw CLIError.commandFailed("Administrator command failed: \(result.output)")
     }
+}
+
+func runWithSudoOrAdministrator(_ executable: String, _ arguments: [String]) throws {
+    let sudoCheck = try run("/usr/bin/sudo", ["-n", executable] + arguments)
+    if sudoCheck.status == 0 {
+        return
+    }
+
+    try runAsAdministrator(executable, arguments)
 }
 
 func runCurl(_ url: String) throws -> String {
@@ -951,7 +955,7 @@ func terminateOpenVPN(pid: Int32, signal: Int32) throws {
     }
 
     if errno == EPERM {
-        try runAsAdministrator("/bin/kill", ["-\(signal)", String(pid)])
+        try runWithSudoOrAdministrator("/bin/kill", ["-\(signal)", String(pid)])
         return
     }
 
@@ -1092,11 +1096,17 @@ func rotateOpenVPN(country: String, args: [String]) throws {
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptPath.path)
 
     print("Connecting: \(selected.name) (\(selected.hostname))")
-    let sudoCheck = try run("/usr/bin/sudo", ["-n", openvpn, "--version"])
-    if sudoCheck.status != 0 {
+    let openVPNArguments = [
+        "--config", selected.configPath,
+        "--daemon", "nordvpn-macos-cli",
+        "--writepid", pidPath.path,
+        "--log-append", logPath.path,
+    ]
+    let startResult = try run("/usr/bin/sudo", ["-n", openvpn] + openVPNArguments)
+    if startResult.status != 0 {
         print("macOS administrator authorization required.")
+        try runAsAdministrator(scriptPath.path, [])
     }
-    try runAsAdministrator(scriptPath.path, [])
 
     let startupTimeout = max(waitSeconds, 5)
     let pid = try waitForOpenVPNStart(pidPath: pidPath, logPath: logPath, timeoutSeconds: startupTimeout)

@@ -5,6 +5,10 @@ Command line control for NordVPN on macOS.
 The tool downloads NordVPN OpenVPN configs, stores your NordVPN service password
 in macOS Keychain, and rotates between servers from Terminal.
 
+It can also install a narrow sudoers rule so AI agents, scraping scripts, cron
+jobs, and other automation tools can switch VPN IPs without manual password
+prompts.
+
 ## Contents
 
 - [Requirements](#requirements)
@@ -101,7 +105,8 @@ Notes:
 - `setup-openvpn` asks for the NordVPN service password.
 - `rotate-openvpn` does not need `--username`; it uses the username saved by setup.
 - `rotate-openvpn` may ask for the macOS admin password because OpenVPN needs sudo.
-- `install-sudoers` enables unattended rotation with a narrow sudoers rule.
+- Use `install-sudoers` when an AI agent or automation tool needs to rotate IPs
+  without repeated macOS password prompts.
 - If `openvpn` is missing, run `brew install openvpn`.
 
 </details>
@@ -181,7 +186,11 @@ your NordVPN password.
 
 ## Unattended rotation
 
-For scheduled rotation, enable the optional sudoers rule:
+`install-sudoers` is for AI agents, scraping workflows, cron jobs, launchd jobs,
+and other automation tools that need to switch VPN IPs using your NordVPN
+subscription without asking for the macOS password every time.
+
+Enable the optional sudoers rule:
 
 ```sh
 nordvpn-macos install-sudoers
@@ -193,8 +202,9 @@ This asks for macOS administrator approval once and installs:
 /etc/sudoers.d/nordvpn-macos-cli
 ```
 
-The rule is limited to the Homebrew OpenVPN binary and `/bin/kill`. It does not
-grant broad passwordless sudo access.
+The rule is limited to the Homebrew OpenVPN binary and `/bin/kill`. This lets
+`rotate-openvpn` start and stop the managed tunnel unattended. It does not grant
+broad passwordless sudo access.
 
 Preview the rule first:
 
@@ -208,7 +218,7 @@ Remove the rule:
 nordvpn-macos uninstall-sudoers
 ```
 
-Then use a scheduler such as `cron`, `launchd`, or your scraping script:
+Then use an AI agent, scheduler, or scraping script:
 
 ```sh
 nordvpn-macos rotate-openvpn Indonesia --ip
@@ -222,6 +232,9 @@ Example cron entry for rotation every 10 minutes:
 
 Security note: passwordless sudo should be kept narrow. Do not grant broad
 `NOPASSWD: ALL` access.
+
+Use this only for accounts, devices, and websites you are authorized to access.
+Do not use IP rotation for abuse, evading bans, or bypassing rate limits.
 
 The generated sudoers rule looks like this on Apple Silicon Homebrew:
 
