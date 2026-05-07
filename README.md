@@ -13,6 +13,7 @@ in macOS Keychain, and rotates between servers from Terminal.
 - [NordVPN credentials](#nordvpn-credentials)
 - [Setup](#setup)
 - [Usage](#usage)
+- [Unattended rotation](#unattended-rotation)
 - [Commands](#commands)
 - [Shell aliases](#shell-aliases)
 - [Homebrew](#homebrew)
@@ -100,6 +101,7 @@ Notes:
 - `setup-openvpn` asks for the NordVPN service password.
 - `rotate-openvpn` does not need `--username`; it uses the username saved by setup.
 - `rotate-openvpn` may ask for the macOS admin password because OpenVPN needs sudo.
+- `install-sudoers` enables unattended rotation with a narrow sudoers rule.
 - If `openvpn` is missing, run `brew install openvpn`.
 
 </details>
@@ -177,6 +179,56 @@ nordvpn-macos ip
 tunnel interface and routes. If prompted, enter your macOS admin password, not
 your NordVPN password.
 
+## Unattended rotation
+
+For scheduled rotation, enable the optional sudoers rule:
+
+```sh
+nordvpn-macos install-sudoers
+```
+
+This asks for macOS administrator approval once and installs:
+
+```text
+/etc/sudoers.d/nordvpn-macos-cli
+```
+
+The rule is limited to the Homebrew OpenVPN binary and `/bin/kill`. It does not
+grant broad passwordless sudo access.
+
+Preview the rule first:
+
+```sh
+nordvpn-macos install-sudoers --dry-run
+```
+
+Remove the rule:
+
+```sh
+nordvpn-macos uninstall-sudoers
+```
+
+Then use a scheduler such as `cron`, `launchd`, or your scraping script:
+
+```sh
+nordvpn-macos rotate-openvpn Indonesia --ip
+```
+
+Example cron entry for rotation every 10 minutes:
+
+```cron
+*/10 * * * * /opt/homebrew/bin/nordvpn-macos rotate-openvpn Indonesia >/tmp/nordvpn-macos-rotate.log 2>&1
+```
+
+Security note: passwordless sudo should be kept narrow. Do not grant broad
+`NOPASSWD: ALL` access.
+
+The generated sudoers rule looks like this on Apple Silicon Homebrew:
+
+```text
+%admin ALL=(root) NOPASSWD: /opt/homebrew/opt/openvpn/sbin/openvpn, /bin/kill
+```
+
 ## Commands
 
 ```text
@@ -184,6 +236,8 @@ nordvpn-macos setup-openvpn <country> --username <name> [--count n] [--tcp] [--p
 nordvpn-macos rotate-openvpn <country> [--wait seconds] [--ip] [--dry-run]
 nordvpn-macos status-openvpn
 nordvpn-macos stop-openvpn
+nordvpn-macos install-sudoers [--dry-run]
+nordvpn-macos uninstall-sudoers
 nordvpn-macos ip
 ```
 

@@ -55,6 +55,8 @@ func printUsage() {
       \(executableName) rotate-openvpn <country> [--wait seconds] [--ip] [--dry-run]
       \(executableName) status-openvpn
       \(executableName) stop-openvpn
+      \(executableName) install-sudoers [--dry-run]
+      \(executableName) uninstall-sudoers
       \(executableName) ip
 
     Examples:
@@ -62,12 +64,14 @@ func printUsage() {
       \(executableName) rotate-openvpn Indonesia --ip
       \(executableName) status-openvpn
       \(executableName) stop-openvpn
+      \(executableName) install-sudoers
 
     Notes:
       - This tool does not log in to the NordVPN macOS app.
       - Run setup-openvpn before rotate-openvpn.
       - rotate-openvpn uses the username saved during setup-openvpn.
       - OpenVPN requires your macOS admin password for sudo when starting the tunnel.
+      - install-sudoers enables unattended rotation with a narrow sudoers rule.
       - Changing VPN state can interrupt active network connections.
     """)
 }
@@ -95,39 +99,28 @@ func run(_ executable: String, _ arguments: [String]) throws -> CommandResult {
     return CommandResult(status: process.terminationStatus, output: output)
 }
 
-func runInteractive(_ executable: String, _ arguments: [String]) throws -> Int32 {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: executable)
-    process.arguments = arguments
-    process.standardInput = FileHandle.standardInput
-    process.standardOutput = FileHandle.standardOutput
-    process.standardError = FileHandle.standardError
-
-    do {
-        try process.run()
-    } catch {
-        throw CLIError.commandFailed("Failed to run \(executable): \(error.localizedDescription)")
-    }
-
-    process.waitUntilExit()
-    return process.terminationStatus
+func shellQuoted(_ value: String) -> String {
+    "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
 }
 
-func ensureSudoAuthenticated() throws {
-    let check = try run("/usr/bin/sudo", ["-n", "-v"])
-    if check.status == 0 {
+func appleScriptString(_ value: String) -> String {
+    "\"" + value
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+}
+
+func runAsAdministrator(_ executable: String, _ arguments: [String]) throws {
+    let sudoCheck = try run("/usr/bin/sudo", ["-n", executable] + arguments)
+    if sudoCheck.status == 0 {
         return
     }
 
-    print("OpenVPN needs sudo to create the tunnel interface and routes.")
-    print("Enter your macOS administrator password if prompted. This is not your NordVPN password.")
-    let status = try runInteractive("/usr/bin/sudo", [
-        "-p", "macOS admin password for OpenVPN: ",
-        "-v",
-    ])
-
-    if status != 0 {
-        throw CLIError.commandFailed("sudo authentication failed.")
+    let command = ([executable] + arguments).map(shellQuoted).joined(separator: " ")
+    let prompt = "nordvpn-macos needs administrator access to manage OpenVPN."
+    let script = "do shell script \(appleScriptString(command)) with administrator privileges with prompt \(appleScriptString(prompt))"
+    let result = try run("/usr/bin/osascript", ["-e", script])
+    if result.status != 0 {
+        throw CLIError.commandFailed("Administrator command failed: \(result.output)")
     }
 }
 
@@ -153,11 +146,30 @@ func runScutil(_ arguments: [String], allowFailure: Bool = false) throws -> Comm
 }
 
 func publicIP() throws -> String {
-    let result = try run("/usr/bin/curl", ["-fsSL", "https://api.ipify.org"])
-    if result.status != 0 {
-        throw CLIError.commandFailed("Unable to fetch public IP: \(result.output)")
+    let endpoints = [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ]
+
+    var errors: [String] = []
+    for endpoint in endpoints {
+        let result = try run("/usr/bin/curl", [
+            "-fsSL",
+            "--connect-timeout", "5",
+            "--max-time", "10",
+            endpoint,
+        ])
+        if result.status == 0 {
+            let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !output.isEmpty {
+                return output
+            }
+        }
+        errors.append("\(endpoint): \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))")
     }
-    return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    throw CLIError.commandFailed("Unable to fetch public IP. Tried: \(errors.joined(separator: "; "))")
 }
 
 func requireVPNName(_ args: [String]) throws -> String {
@@ -293,6 +305,15 @@ func printCommandOutput(_ result: CommandResult) {
 func printPublicIPIfRequested(_ requested: Bool) throws {
     guard requested else { return }
     print("Public IP: \(try publicIP())")
+}
+
+func printPublicIPIfAvailable(_ requested: Bool) {
+    guard requested else { return }
+    do {
+        print("Public IP: \(try publicIP())")
+    } catch {
+        print("Public IP: unavailable yet (DNS/network may still be settling). Try again with: \(executableName) ip")
+    }
 }
 
 func listVPNs() throws {
@@ -539,6 +560,14 @@ func openVPNAuthPath() throws -> URL {
     try openVPNDirectory().appendingPathComponent("auth.txt")
 }
 
+func openVPNScriptPath() throws -> URL {
+    try openVPNDirectory().appendingPathComponent("run-openvpn.sh")
+}
+
+func openVPNPidPath() throws -> URL {
+    try openVPNDirectory().appendingPathComponent("openvpn.pid")
+}
+
 func saveJSON<T: Encodable>(_ value: T, to url: URL) throws {
     let data = try JSONEncoder().encode(value)
     try data.write(to: url, options: .atomic)
@@ -574,6 +603,58 @@ func openVPNExecutable() throws -> String {
     throw CLIError.commandFailed("OpenVPN not found. Install it with: brew install openvpn")
 }
 
+func sudoersPath() -> String {
+    "/etc/sudoers.d/nordvpn-macos-cli"
+}
+
+func sudoersContent(openvpnPath: String) -> String {
+    """
+    # Allow nordvpn-macos-cli to rotate OpenVPN connections without repeated password prompts.
+    # This grants passwordless sudo only for Homebrew OpenVPN and /bin/kill.
+    %admin ALL=(root) NOPASSWD: \(openvpnPath), /bin/kill
+
+    """
+}
+
+func installSudoers(args: [String]) throws {
+    let openvpn = try openVPNExecutable()
+    let path = sudoersPath()
+    let content = sudoersContent(openvpnPath: openvpn)
+
+    if shouldDryRun(args) {
+        print("Would write: \(path)")
+        print(content, terminator: "")
+        return
+    }
+
+    let tempPath = "/tmp/nordvpn-macos-cli-sudoers"
+    try content.write(toFile: tempPath, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o440], ofItemAtPath: tempPath)
+
+    print("Installing sudoers rule: \(path)")
+    print("macOS administrator authorization required.")
+    try runAsAdministrator("/bin/sh", [
+        "-c",
+        "install -m 0440 \(shellQuoted(tempPath)) \(shellQuoted(path)) && /usr/sbin/visudo -cf \(shellQuoted(path))",
+    ])
+    try? FileManager.default.removeItem(atPath: tempPath)
+
+    let validation = try run("/usr/bin/sudo", ["-n", openvpn, "--version"])
+    if validation.status != 0 {
+        print("Installed sudoers rule, but passwordless validation did not pass yet. Open a new terminal and try rotate-openvpn again.")
+    } else {
+        print("Installed sudoers rule. rotate-openvpn can now run unattended.")
+    }
+}
+
+func uninstallSudoers() throws {
+    let path = sudoersPath()
+    print("Removing sudoers rule: \(path)")
+    print("macOS administrator authorization required.")
+    try runAsAdministrator("/bin/rm", ["-f", path])
+    print("Removed sudoers rule.")
+}
+
 func storeOpenVPNPassword(username: String, password: String) throws {
     let result = try run("/usr/bin/security", [
         "add-generic-password", "-U",
@@ -583,6 +664,17 @@ func storeOpenVPNPassword(username: String, password: String) throws {
     ])
     if result.status != 0 {
         throw CLIError.commandFailed("Unable to store password in Keychain: \(result.output)")
+    }
+}
+
+func deleteOpenVPNPassword(username: String) throws {
+    let result = try run("/usr/bin/security", [
+        "delete-generic-password",
+        "-s", "nordvpn-macos-cli-openvpn",
+        "-a", username,
+    ])
+    if result.status != 0 && !result.output.contains("could not be found") {
+        throw CLIError.commandFailed("Unable to delete old Keychain password: \(result.output)")
     }
 }
 
@@ -766,6 +858,7 @@ func setupOpenVPN(country: String, args: [String]) throws {
     _ = try openVPNExecutable()
     let password = try readPassword(hidden: !shouldReadPasswordFromStdin(args))
     print("Storing password in macOS Keychain...")
+    try? deleteOpenVPNPassword(username: username)
     try storeOpenVPNPassword(username: username, password: password)
 
     let useTCP = shouldUseTCP(args)
@@ -820,14 +913,36 @@ func loadOpenVPNProfiles(country: String) throws -> [OpenVPNProfile] {
 
 func currentOpenVPNState() throws -> OpenVPNState? {
     let path = try openVPNStatePath()
-    guard FileManager.default.fileExists(atPath: path.path) else {
+    if FileManager.default.fileExists(atPath: path.path),
+       let state = try? loadJSON(OpenVPNState.self, from: path) {
+        return state
+    }
+
+    let pidPath = try openVPNPidPath()
+    guard FileManager.default.fileExists(atPath: pidPath.path),
+          let pidText = try? String(contentsOf: pidPath, encoding: .utf8),
+          let pid = Int32(pidText.trimmingCharacters(in: .whitespacesAndNewlines)),
+          processIsRunning(pid: pid) else {
         return nil
     }
-    return try? loadJSON(OpenVPNState.self, from: path)
+
+    return OpenVPNState(
+        pid: pid,
+        profileName: "OpenVPN",
+        country: "unknown",
+        hostname: "unknown",
+        startedAt: "unknown"
+    )
 }
 
 func processIsRunning(pid: Int32) -> Bool {
-    kill(pid, 0) == 0
+    if kill(pid, 0) == 0 {
+        return true
+    }
+
+    // OpenVPN is started as root. For a non-root caller, kill(pid, 0) can fail
+    // with EPERM even though the process exists.
+    return errno == EPERM
 }
 
 func terminateOpenVPN(pid: Int32, signal: Int32) throws {
@@ -836,11 +951,7 @@ func terminateOpenVPN(pid: Int32, signal: Int32) throws {
     }
 
     if errno == EPERM {
-        try ensureSudoAuthenticated()
-        let result = try run("/usr/bin/sudo", ["-n", "/bin/kill", "-\(signal)", String(pid)])
-        if result.status != 0 {
-            throw CLIError.commandFailed("Unable to stop OpenVPN process \(pid): \(result.output)")
-        }
+        try runAsAdministrator("/bin/kill", ["-\(signal)", String(pid)])
         return
     }
 
@@ -889,6 +1000,60 @@ func writeAuthFile(username: String) throws {
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
 }
 
+func recentOpenVPNLog(from url: URL) -> String {
+    (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+}
+
+func waitForOpenVPNStart(pidPath: URL, logPath: URL, timeoutSeconds: UInt32) throws -> Int32 {
+    let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+    var lastStatus = "waiting for OpenVPN to write pid"
+
+    while Date() < deadline {
+        if let pidText = try? String(contentsOf: pidPath, encoding: .utf8),
+           let pid = Int32(pidText.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            print("OpenVPN process started with pid \(pid). Waiting for tunnel confirmation...")
+
+            let tunnelDeadline = Date().addingTimeInterval(20)
+            while Date() < tunnelDeadline {
+                let log = recentOpenVPNLog(from: logPath)
+                if log.contains("Initialization Sequence Completed") {
+                    print("OpenVPN tunnel is up.")
+                    return pid
+                }
+                if log.contains("AUTH_FAILED") {
+                    throw CLIError.commandFailed("OpenVPN authentication failed. Re-run setup-openvpn with the NordVPN manual service username and password, then try rotate-openvpn again. Log: \(logPath.path)")
+                }
+                if !processIsRunning(pid: pid) {
+                    throw CLIError.commandFailed("OpenVPN exited before the tunnel was ready. Check log: \(logPath.path)")
+                }
+                usleep(500_000)
+            }
+
+            print("OpenVPN process is running, but tunnel confirmation was not seen yet. Continuing.")
+            return pid
+        }
+
+        let log = recentOpenVPNLog(from: logPath)
+        if log.contains("AUTH_FAILED") {
+            throw CLIError.commandFailed("OpenVPN authentication failed. Re-run setup-openvpn with the NordVPN manual service username and password, then try rotate-openvpn again. Log: \(logPath.path)")
+        }
+
+        if log.contains("TLS: Initial packet") && lastStatus != "authenticating" {
+            print("OpenVPN contacted the server. Authenticating...")
+            lastStatus = "authenticating"
+        } else if log.contains("Peer Connection Initiated") && lastStatus != "requesting configuration" {
+            print("OpenVPN authenticated TLS. Requesting VPN configuration...")
+            lastStatus = "requesting configuration"
+        } else if log.contains("AUTH_FAILED") && lastStatus != "auth failed" {
+            lastStatus = "auth failed"
+        }
+
+        usleep(500_000)
+    }
+
+    throw CLIError.commandFailed("OpenVPN process was not found after start. Check log: \(logPath.path)")
+}
+
 func rotateOpenVPN(country: String, args: [String]) throws {
     let profiles = try loadOpenVPNProfiles(country: country)
     guard let selected = profiles.randomElement() else {
@@ -906,37 +1071,35 @@ func rotateOpenVPN(country: String, args: [String]) throws {
     let openvpn = try openVPNExecutable()
     try writeAuthFile(username: username)
     try stopOpenVPN(quiet: true)
-    try ensureSudoAuthenticated()
 
     let waitSeconds = try parseWait(args, defaultWait: 10)
-    let logPath = URL(fileURLWithPath: "/tmp/nordvpn-macos-cli-openvpn.log")
-    let pidPath = URL(fileURLWithPath: "/tmp/nordvpn-macos-cli-openvpn.pid")
+    let logPath = try openVPNDirectory().appendingPathComponent("openvpn.log")
+    let pidPath = try openVPNPidPath()
+    let scriptPath = try openVPNScriptPath()
     try? FileManager.default.removeItem(at: pidPath)
+    try? FileManager.default.removeItem(at: logPath)
+    FileManager.default.createFile(atPath: logPath.path, contents: nil)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logPath.path)
+    let script = """
+    #!/bin/sh
+    exec \(shellQuoted(openvpn)) \
+      --config \(shellQuoted(selected.configPath)) \
+      --daemon nordvpn-macos-cli \
+      --writepid \(shellQuoted(pidPath.path)) \
+      --log-append \(shellQuoted(logPath.path))
+    """
+    try script.write(to: scriptPath, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptPath.path)
 
     print("Connecting: \(selected.name) (\(selected.hostname))")
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-    process.arguments = [
-        "-n",
-        openvpn,
-        "--config", selected.configPath,
-        "--daemon", "nordvpn-macos-cli",
-        "--writepid", pidPath.path,
-        "--log", logPath.path,
-    ]
-    try process.run()
-    process.waitUntilExit()
-
-    if process.terminationStatus != 0 {
-        throw CLIError.commandFailed("OpenVPN failed to start. Check log: \(logPath.path)")
+    let sudoCheck = try run("/usr/bin/sudo", ["-n", openvpn, "--version"])
+    if sudoCheck.status != 0 {
+        print("macOS administrator authorization required.")
     }
+    try runAsAdministrator(scriptPath.path, [])
 
-    sleep(waitSeconds)
-
-    let pidText = (try? String(contentsOf: pidPath, encoding: .utf8)) ?? ""
-    guard let pid = Int32(pidText.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-        throw CLIError.commandFailed("OpenVPN process was not found after start. Check log: \(logPath.path)")
-    }
+    let startupTimeout = max(waitSeconds, 5)
+    let pid = try waitForOpenVPNStart(pidPath: pidPath, logPath: logPath, timeoutSeconds: startupTimeout)
 
     let state = OpenVPNState(
         pid: pid,
@@ -948,7 +1111,7 @@ func rotateOpenVPN(country: String, args: [String]) throws {
     try saveJSON(state, to: openVPNStatePath())
 
     print("Started: \(selected.name) (pid \(pid))")
-    try printPublicIPIfRequested(shouldPrintIP(args))
+    printPublicIPIfAvailable(shouldPrintIP(args))
 }
 
 
@@ -1013,6 +1176,10 @@ func main() throws {
         try statusOpenVPN()
     case "stop-openvpn":
         try stopOpenVPN()
+    case "install-sudoers":
+        try installSudoers(args: args)
+    case "uninstall-sudoers":
+        try uninstallSudoers()
     case "ip":
         print(try publicIP())
     default:
