@@ -112,6 +112,19 @@ func run(_ executable: String, _ arguments: [String]) throws -> CommandResult {
     return CommandResult(status: process.terminationStatus, output: output)
 }
 
+func runCurl(_ url: String) throws -> String {
+    let result = try run("/usr/bin/curl", [
+        "-fsSL",
+        "--connect-timeout", "15",
+        "--max-time", "60",
+        url,
+    ])
+    if result.status != 0 {
+        throw CLIError.commandFailed("curl failed for \(url): \(result.output)")
+    }
+    return result.output
+}
+
 func runScutil(_ arguments: [String], allowFailure: Bool = false) throws -> CommandResult {
     let result = try run("/usr/sbin/scutil", ["--nc"] + arguments)
     if result.status != 0 && !allowFailure {
@@ -570,11 +583,7 @@ func loadOpenVPNPassword(username: String) throws -> String {
 func fetchNordVPNOpenVPNConfig(hostname: String, useTCP: Bool) throws -> String {
     let proto = useTCP ? "tcp" : "udp"
     let url = "https://downloads.nordcdn.com/configs/files/ovpn_\(proto)/servers/\(hostname).\(proto).ovpn"
-    let result = try run("/usr/bin/curl", ["-fsSL", url])
-    if result.status != 0 {
-        throw CLIError.commandFailed("Unable to download OpenVPN config for \(hostname): \(result.output)")
-    }
-    return result.output
+    return try runCurl(url)
 }
 
 func configuredOpenVPNConfig(_ config: String) throws -> String {
@@ -607,11 +616,10 @@ func fetchNordVPNServers(country: String, count: Int, technologyIdentifier: Stri
         throw CLIError.commandFailed("Unable to build NordVPN API URL.")
     }
 
-    let data: Data
-    do {
-        data = try Data(contentsOf: url)
-    } catch {
-        throw CLIError.commandFailed("Unable to fetch NordVPN server recommendations: \(error.localizedDescription)")
+    let output = try runCurl(url.absoluteString)
+
+    guard let data = output.data(using: .utf8) else {
+        throw CLIError.commandFailed("Unable to decode NordVPN server recommendations.")
     }
 
     guard let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
@@ -635,20 +643,15 @@ func fetchNordVPNServers(country: String, count: Int, technologyIdentifier: Stri
 }
 
 func readPassword(hidden: Bool) throws -> String {
-    var restoreEcho = false
-
     if hidden {
-        print("NordVPN service password: ", terminator: "")
-        fflush(stdout)
-        _ = try? run("/bin/stty", ["-echo"])
-        restoreEcho = true
-    }
-
-    defer {
-        if restoreEcho {
-            _ = try? run("/bin/stty", ["echo"])
-            print("")
+        guard let passwordPointer = getpass("NordVPN service password: ") else {
+            throw CLIError.missingArgument("Missing NordVPN service password.")
         }
+        let password = String(cString: passwordPointer)
+        guard !password.isEmpty else {
+            throw CLIError.missingArgument("Missing NordVPN service password.")
+        }
+        return password
     }
 
     guard let password = readLine(), !password.isEmpty else {
@@ -743,9 +746,11 @@ func setupOpenVPN(country: String, args: [String]) throws {
 
     _ = try openVPNExecutable()
     let password = try readPassword(hidden: !shouldReadPasswordFromStdin(args))
+    print("Storing password in macOS Keychain...")
     try storeOpenVPNPassword(username: username, password: password)
 
     let useTCP = shouldUseTCP(args)
+    print("Fetching NordVPN OpenVPN server recommendations for \(country)...")
     let servers = try fetchNordVPNServers(
         country: country,
         count: count,
@@ -757,6 +762,7 @@ func setupOpenVPN(country: String, args: [String]) throws {
 
     var profiles: [OpenVPNProfile] = []
     for (index, server) in servers.enumerated() {
+        print("Downloading OpenVPN config \(index + 1)/\(servers.count): \(server.hostname)")
         let rawConfig = try fetchNordVPNOpenVPNConfig(hostname: server.hostname, useTCP: useTCP)
         let config = try configuredOpenVPNConfig(rawConfig)
         let profileName = "NordVPN \(countryName) \(index + 1)"
