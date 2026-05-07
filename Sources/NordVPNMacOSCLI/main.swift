@@ -48,21 +48,9 @@ func printUsage() {
     print("""
     NordVPN macOS CLI
 
-    A small wrapper around macOS' built-in VPN controller (`scutil --nc`).
-    It works with NordVPN manual IKEv2/IPSec profiles created in System Settings.
+    A macOS CLI for NordVPN OpenVPN setup and rotation.
 
     Usage:
-      \(executableName) list
-      \(executableName) profiles <country>
-      \(executableName) status <vpn-name>
-      \(executableName) connect <vpn-name> [--ip]
-      \(executableName) connect-country <country> [--ip]
-      \(executableName) disconnect <vpn-name>
-      \(executableName) reconnect <vpn-name> [--wait seconds] [--ip]
-      \(executableName) reconnect-country <country> [--wait seconds] [--ip]
-      \(executableName) rotate <vpn-name-1> <vpn-name-2> ... [--wait seconds] [--ip] [--dry-run]
-      \(executableName) rotate-country <country> [--wait seconds] [--ip] [--dry-run]
-      \(executableName) generate-mobileconfig <country> --username <name> [--count n] [--output path] [--open] [--password-stdin]
       \(executableName) setup-openvpn <country> --username <name> [--count n] [--tcp] [--password-stdin]
       \(executableName) rotate-openvpn <country> [--wait seconds] [--ip] [--dry-run]
       \(executableName) status-openvpn
@@ -70,21 +58,16 @@ func printUsage() {
       \(executableName) ip
 
     Examples:
-      \(executableName) list
-      \(executableName) connect "NordVPN Germany"
-      \(executableName) connect-country Germany --ip
-      \(executableName) reconnect-country "United States" --ip
-      \(executableName) rotate-country Germany --ip
-      \(executableName) rotate-country Germany --dry-run
-      \(executableName) generate-mobileconfig Indonesia --count 5 --username your-service-user --open
       \(executableName) setup-openvpn Indonesia --count 5 --username your-service-user
       \(executableName) rotate-openvpn Indonesia --ip
-      \(executableName) rotate "NordVPN Germany 1" "NordVPN Germany 2" --ip
+      \(executableName) status-openvpn
+      \(executableName) stop-openvpn
 
     Notes:
       - This tool does not log in to the NordVPN macOS app.
-      - Create one or more NordVPN IKEv2 profiles in macOS System Settings first.
-      - For country commands, name profiles like "NordVPN <Country>" or "NordVPN <Country> 1".
+      - Run setup-openvpn before rotate-openvpn.
+      - rotate-openvpn uses the username saved during setup-openvpn.
+      - OpenVPN requires your macOS admin password for sudo when starting the tunnel.
       - Changing VPN state can interrupt active network connections.
     """)
 }
@@ -110,6 +93,42 @@ func run(_ executable: String, _ arguments: [String]) throws -> CommandResult {
     let output = String(data: data, encoding: .utf8) ?? ""
 
     return CommandResult(status: process.terminationStatus, output: output)
+}
+
+func runInteractive(_ executable: String, _ arguments: [String]) throws -> Int32 {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardInput = FileHandle.standardInput
+    process.standardOutput = FileHandle.standardOutput
+    process.standardError = FileHandle.standardError
+
+    do {
+        try process.run()
+    } catch {
+        throw CLIError.commandFailed("Failed to run \(executable): \(error.localizedDescription)")
+    }
+
+    process.waitUntilExit()
+    return process.terminationStatus
+}
+
+func ensureSudoAuthenticated() throws {
+    let check = try run("/usr/bin/sudo", ["-n", "-v"])
+    if check.status == 0 {
+        return
+    }
+
+    print("OpenVPN needs sudo to create the tunnel interface and routes.")
+    print("Enter your macOS administrator password if prompted. This is not your NordVPN password.")
+    let status = try runInteractive("/usr/bin/sudo", [
+        "-p", "macOS admin password for OpenVPN: ",
+        "-v",
+    ])
+
+    if status != 0 {
+        throw CLIError.commandFailed("sudo authentication failed.")
+    }
 }
 
 func runCurl(_ url: String) throws -> String {
@@ -817,7 +836,8 @@ func terminateOpenVPN(pid: Int32, signal: Int32) throws {
     }
 
     if errno == EPERM {
-        let result = try run("/usr/bin/sudo", ["/bin/kill", "-\(signal)", String(pid)])
+        try ensureSudoAuthenticated()
+        let result = try run("/usr/bin/sudo", ["-n", "/bin/kill", "-\(signal)", String(pid)])
         if result.status != 0 {
             throw CLIError.commandFailed("Unable to stop OpenVPN process \(pid): \(result.output)")
         }
@@ -881,13 +901,12 @@ func rotateOpenVPN(country: String, args: [String]) throws {
         return
     }
 
-    guard let username = try optionValue(args, option: "--username") else {
-        throw CLIError.missingArgument("Missing --username <NordVPN service username>.")
-    }
+    let username = try optionValue(args, option: "--username") ?? selected.username
 
     let openvpn = try openVPNExecutable()
     try writeAuthFile(username: username)
     try stopOpenVPN(quiet: true)
+    try ensureSudoAuthenticated()
 
     let waitSeconds = try parseWait(args, defaultWait: 10)
     let logPath = URL(fileURLWithPath: "/tmp/nordvpn-macos-cli-openvpn.log")
@@ -898,6 +917,7 @@ func rotateOpenVPN(country: String, args: [String]) throws {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
     process.arguments = [
+        "-n",
         openvpn,
         "--config", selected.configPath,
         "--daemon", "nordvpn-macos-cli",
