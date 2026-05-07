@@ -23,36 +23,36 @@ not control the NordVPN app and it does not store VPN credentials.
 ## Requirements
 
 - macOS 13 or newer.
-- Xcode Command Line Tools to build from source.
+- Homebrew.
 - A NordVPN subscription.
 - One or more NordVPN manual IKEv2/IPSec profiles configured in macOS.
 
-Install Xcode Command Line Tools if needed:
+Install Homebrew if needed:
 
 ```sh
-xcode-select --install
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
 ## Installation
 
-Build from source:
+Install with Homebrew:
 
 ```sh
-git clone https://github.com/3Vis3/nordvpn-macos-cli.git
-cd nordvpn-macos-cli
-swift build -c release
-```
-
-Install the binary:
-
-```sh
-sudo cp .build/release/nordvpn-macos /usr/local/bin/nordvpn-macos
+brew tap 3Vis3/tap
+brew install nordvpn-macos-cli
 ```
 
 Check the installation:
 
 ```sh
 nordvpn-macos help
+```
+
+Upgrade:
+
+```sh
+brew update
+brew upgrade nordvpn-macos-cli
 ```
 
 <details id="ai-agent-install-notes">
@@ -68,24 +68,16 @@ Prerequisites to verify:
 
 ```sh
 sw_vers -productVersion
-xcode-select -p
+brew --version
 scutil --nc list
 ```
 
-Install from source:
+Install with Homebrew:
 
 ```sh
-git clone https://github.com/3Vis3/nordvpn-macos-cli.git
-cd nordvpn-macos-cli
-swift build -c release
-sudo cp .build/release/nordvpn-macos /usr/local/bin/nordvpn-macos
+brew tap 3Vis3/tap
+brew install nordvpn-macos-cli
 nordvpn-macos help
-```
-
-If `/usr/local/bin` does not exist:
-
-```sh
-sudo mkdir -p /usr/local/bin
 ```
 
 Validate without changing VPN state:
@@ -119,7 +111,7 @@ nordvpn-macos disconnect "NordVPN Germany 1"
 
 Failure handling:
 
-- If `xcode-select -p` fails, ask the user to run `xcode-select --install`.
+- If `brew --version` fails, ask the user to install Homebrew.
 - If country commands find no profiles, run `nordvpn-macos list` and check the
   macOS VPN profile names.
 - If `scutil --nc list` does not show the profile, the user must create or fix
@@ -317,29 +309,11 @@ source ~/.zshrc
 
 ## Homebrew
 
-Homebrew distribution requires a published GitHub release or a tap.
+Formula: `3Vis3/tap/nordvpn-macos-cli`
 
-Example formula for a personal tap:
-
-```ruby
-class NordvpnMacosCli < Formula
-  desc "Control NordVPN manual VPN profiles on macOS"
-  homepage "https://github.com/3Vis3/nordvpn-macos-cli"
-  url "https://github.com/3Vis3/nordvpn-macos-cli/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "PUT_RELEASE_TARBALL_SHA256_HERE"
-  license "MIT"
-
-  depends_on xcode: ["13.0", :build]
-
-  def install
-    system "swift", "build", "-c", "release", "--disable-sandbox"
-    bin.install ".build/release/nordvpn-macos"
-  end
-
-  test do
-    assert_match "NordVPN macOS CLI", shell_output("#{bin}/nordvpn-macos help")
-  end
-end
+```sh
+brew tap 3Vis3/tap
+brew install nordvpn-macos-cli
 ```
 
 ## Limitations
