@@ -1,17 +1,18 @@
 # nordvpn-macos-cli
 
-Command-line control for NordVPN manual VPN profiles on macOS.
+Command-line control for NordVPN on macOS.
 
-This tool wraps `scutil --nc`, the VPN controller included with macOS. It does
-not control the NordVPN app and it does not store VPN credentials.
+The reliable CLI path uses OpenVPN configs and macOS Keychain. Legacy helpers
+for macOS VPN profiles are still available, but IKEv2 profiles are not
+consistently controllable from Terminal on macOS.
 
 ## Contents
 
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [AI agent install notes](#ai-agent-install-notes)
-- [NordVPN profile setup](#nordvpn-profile-setup)
-- [Automated profile generation](#automated-profile-generation)
+- [OpenVPN setup](#openvpn-setup)
+- [IKEv2 profile helpers](#ikev2-profile-helpers)
 - [Usage](#usage)
 - [Shell aliases](#shell-aliases)
 - [Homebrew](#homebrew)
@@ -25,8 +26,9 @@ not control the NordVPN app and it does not store VPN credentials.
 
 - macOS 13 or newer.
 - Homebrew.
+- OpenVPN, installed with Homebrew.
 - A NordVPN subscription.
-- One or more NordVPN manual IKEv2/IPSec profiles configured in macOS.
+- NordVPN manual service credentials.
 
 Install Homebrew if needed:
 
@@ -41,6 +43,7 @@ Install with Homebrew:
 ```sh
 brew tap 3Vis3/tap
 brew install nordvpn-macos-cli
+brew install openvpn
 ```
 
 Check the installation:
@@ -59,11 +62,11 @@ brew upgrade nordvpn-macos-cli
 <details id="ai-agent-install-notes">
 <summary>AI agent install notes</summary>
 
-Purpose: install and use `nordvpn-macos`, a Swift CLI that controls existing
-macOS VPN profiles via `scutil --nc`.
+Purpose: install and use `nordvpn-macos`, a Swift CLI that rotates NordVPN
+OpenVPN configs on macOS.
 
-Do not ask for or store NordVPN credentials. This tool does not create NordVPN
-accounts and does not log in to the NordVPN app.
+This tool does not create NordVPN accounts and does not log in to the NordVPN
+app. For OpenVPN mode, it stores the NordVPN service password in macOS Keychain.
 
 Prerequisites to verify:
 
@@ -78,6 +81,7 @@ Install with Homebrew:
 ```sh
 brew tap 3Vis3/tap
 brew install nordvpn-macos-cli
+brew install openvpn
 nordvpn-macos help
 ```
 
@@ -86,38 +90,27 @@ Validate without changing VPN state:
 ```sh
 nordvpn-macos list
 nordvpn-macos ip
-nordvpn-macos rotate-country Germany --dry-run
+nordvpn-macos rotate-openvpn Germany --dry-run
 ```
 
-Before running connect, reconnect, disconnect, or rotate without `--dry-run`,
-tell the user VPN state changes can interrupt active network connections.
-
-Expected profile naming:
-
-```text
-NordVPN <Country> 1
-NordVPN <Country> 2
-NordVPN <Country> 3
-```
+Before running connect, reconnect, disconnect, or rotate commands without
+`--dry-run`, tell the user VPN state changes can interrupt active network
+connections.
 
 Common commands:
 
 ```sh
-nordvpn-macos generate-mobileconfig Indonesia --count 5 --username NORD_SERVICE_USERNAME --open
-nordvpn-macos profiles Germany
-nordvpn-macos connect-country Germany --ip
-nordvpn-macos reconnect-country Germany --ip
-nordvpn-macos rotate-country Germany --ip
-nordvpn-macos disconnect "NordVPN Germany 1"
+nordvpn-macos setup-openvpn Indonesia --count 5 --username NORD_SERVICE_USERNAME
+nordvpn-macos rotate-openvpn Indonesia --ip
+nordvpn-macos status-openvpn
+nordvpn-macos stop-openvpn
 ```
 
 Failure handling:
 
 - If `brew --version` fails, ask the user to install Homebrew.
-- If country commands find no profiles, run `nordvpn-macos list` and check the
-  macOS VPN profile names.
-- If `scutil --nc list` does not show the profile, the user must create or fix
-  the macOS VPN profile first.
+- If `openvpn` is missing, run `brew install openvpn`.
+- If OpenVPN setup has not run, run `setup-openvpn` before `rotate-openvpn`.
 - Do not use third-party scripts that require plaintext NordVPN credentials
   unless the user explicitly accepts that risk.
 - If using `generate-mobileconfig`, tell the user the generated file contains
@@ -125,7 +118,62 @@ Failure handling:
 
 </details>
 
-## NordVPN profile setup
+## OpenVPN setup
+
+OpenVPN mode is the recommended mode for CLI rotation on macOS.
+
+Get NordVPN service credentials from:
+
+```text
+NordVPN -> Set up NordVPN manually -> Service credentials
+```
+
+Set up five Indonesia configs:
+
+```sh
+nordvpn-macos setup-openvpn Indonesia \
+  --count 5 \
+  --username NORD_SERVICE_USERNAME
+```
+
+The command prompts for the NordVPN service password without echoing it and
+stores it in macOS Keychain. OpenVPN config files are stored under:
+
+```text
+~/Library/Application Support/nordvpn-macos-cli/openvpn/
+```
+
+Rotate IP:
+
+```sh
+nordvpn-macos rotate-openvpn Indonesia --ip
+```
+
+Check status:
+
+```sh
+nordvpn-macos status-openvpn
+```
+
+Stop the managed OpenVPN process:
+
+```sh
+nordvpn-macos stop-openvpn
+```
+
+Use TCP instead of UDP during setup:
+
+```sh
+nordvpn-macos setup-openvpn Indonesia \
+  --count 5 \
+  --username NORD_SERVICE_USERNAME \
+  --tcp
+```
+
+`rotate-openvpn` uses `sudo` because OpenVPN needs privileges to create the VPN
+tunnel interface and routes.
+
+## IKEv2 profile helpers
 
 The standard NordVPN macOS app does not provide the Linux `nordvpn` CLI. To use
 this tool, create one or more manual IKEv2/IPSec profiles in macOS System
@@ -187,7 +235,7 @@ NordVPN Germany 3
 
 Country commands match the country text in the profile name.
 
-## Automated profile generation
+### Automated profile generation
 
 `generate-mobileconfig` creates an installable macOS configuration profile for
 multiple NordVPN IKEv2 servers in a country. It fetches recommended IKEv2
@@ -251,6 +299,17 @@ nordvpn-macos rotate-country Indonesia --dry-run
 ```
 
 ## Usage
+
+Recommended OpenVPN rotation:
+
+```sh
+nordvpn-macos setup-openvpn Indonesia --count 5 --username NORD_SERVICE_USERNAME
+nordvpn-macos rotate-openvpn Indonesia --ip
+nordvpn-macos status-openvpn
+nordvpn-macos stop-openvpn
+```
+
+Legacy IKEv2/scutil commands:
 
 List configured VPN services:
 
@@ -355,6 +414,10 @@ nordvpn-macos reconnect-country <country> [--wait seconds] [--ip]
 nordvpn-macos rotate <vpn-name-1> <vpn-name-2> ... [--wait seconds] [--ip] [--dry-run]
 nordvpn-macos rotate-country <country> [--wait seconds] [--ip] [--dry-run]
 nordvpn-macos generate-mobileconfig <country> --username <name> [--count n] [--output path] [--open] [--password-stdin]
+nordvpn-macos setup-openvpn <country> --username <name> [--count n] [--tcp] [--password-stdin]
+nordvpn-macos rotate-openvpn <country> [--wait seconds] [--ip] [--dry-run]
+nordvpn-macos status-openvpn
+nordvpn-macos stop-openvpn
 nordvpn-macos ip
 ```
 
@@ -363,10 +426,9 @@ nordvpn-macos ip
 Add aliases to `~/.zshrc`:
 
 ```sh
-alias vpn-de='nordvpn-macos connect-country Germany --ip'
-alias vpn-de-reconnect='nordvpn-macos reconnect-country Germany --ip'
-alias vpn-de-rotate='nordvpn-macos rotate-country Germany --ip'
-alias vpn-de-off='nordvpn-macos disconnect "NordVPN Germany 1"'
+alias vpn-id='nordvpn-macos rotate-openvpn Indonesia --ip'
+alias vpn-status='nordvpn-macos status-openvpn'
+alias vpn-off='nordvpn-macos stop-openvpn'
 ```
 
 Reload the shell:
@@ -388,9 +450,10 @@ brew install nordvpn-macos-cli
 
 - This is not the official NordVPN CLI.
 - The NordVPN macOS app login is not used by this tool.
-- Profiles must be created in macOS before this tool can control them.
-- Reconnecting the same profile may return the same public IP.
-- `scutil --nc` must be able to see the VPN profile.
+- OpenVPN mode requires `sudo` to start/stop the VPN tunnel.
+- OpenVPN mode manages only the process it starts.
+- IKEv2/scutil mode depends on macOS exposing the VPN profile to `scutil --nc`.
+- Reconnecting the same server may return the same public IP.
 - Generated `.mobileconfig` files can contain the NordVPN service password.
 
 ## Troubleshooting

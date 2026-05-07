@@ -1,8 +1,27 @@
+import Darwin
 import Foundation
 
 struct CommandResult {
     let status: Int32
     let output: String
+}
+
+struct OpenVPNProfile: Codable {
+    let name: String
+    let country: String
+    let hostname: String
+    let configPath: String
+    let username: String
+    let remoteIP: String?
+    let load: Int
+}
+
+struct OpenVPNState: Codable {
+    let pid: Int32
+    let profileName: String
+    let country: String
+    let hostname: String
+    let startedAt: String
 }
 
 enum CLIError: Error, CustomStringConvertible {
@@ -44,6 +63,10 @@ func printUsage() {
       \(executableName) rotate <vpn-name-1> <vpn-name-2> ... [--wait seconds] [--ip] [--dry-run]
       \(executableName) rotate-country <country> [--wait seconds] [--ip] [--dry-run]
       \(executableName) generate-mobileconfig <country> --username <name> [--count n] [--output path] [--open] [--password-stdin]
+      \(executableName) setup-openvpn <country> --username <name> [--count n] [--tcp] [--password-stdin]
+      \(executableName) rotate-openvpn <country> [--wait seconds] [--ip] [--dry-run]
+      \(executableName) status-openvpn
+      \(executableName) stop-openvpn
       \(executableName) ip
 
     Examples:
@@ -54,6 +77,8 @@ func printUsage() {
       \(executableName) rotate-country Germany --ip
       \(executableName) rotate-country Germany --dry-run
       \(executableName) generate-mobileconfig Indonesia --count 5 --username your-service-user --open
+      \(executableName) setup-openvpn Indonesia --count 5 --username your-service-user
+      \(executableName) rotate-openvpn Indonesia --ip
       \(executableName) rotate "NordVPN Germany 1" "NordVPN Germany 2" --ip
 
     Notes:
@@ -181,6 +206,10 @@ func shouldReadPasswordFromStdin(_ args: [String]) -> Bool {
     args.contains("--password-stdin")
 }
 
+func shouldUseTCP(_ args: [String]) -> Bool {
+    args.contains("--tcp")
+}
+
 func positionalArguments(_ args: [String]) throws -> [String] {
     var values: [String] = []
     var index = args.startIndex
@@ -197,7 +226,7 @@ func positionalArguments(_ args: [String]) throws -> [String] {
             continue
         }
 
-        if value == "--open" || value == "--password-stdin" {
+        if value == "--open" || value == "--password-stdin" || value == "--tcp" {
             index = args.index(after: index)
             continue
         }
@@ -453,7 +482,113 @@ func slug(_ value: String) -> String {
         .replacingOccurrences(of: "--", with: "-")
 }
 
-func fetchNordVPNServers(country: String, count: Int) throws -> [NordVPNServer] {
+func appSupportDirectory() throws -> URL {
+    let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    let directory = base.appendingPathComponent("nordvpn-macos-cli", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    return directory
+}
+
+func openVPNDirectory() throws -> URL {
+    let directory = try appSupportDirectory().appendingPathComponent("openvpn", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    return directory
+}
+
+func openVPNProfilesPath(country: String) throws -> URL {
+    try openVPNDirectory().appendingPathComponent("\(slug(country)).profiles.json")
+}
+
+func openVPNStatePath() throws -> URL {
+    try openVPNDirectory().appendingPathComponent("state.json")
+}
+
+func openVPNAuthPath() throws -> URL {
+    try openVPNDirectory().appendingPathComponent("auth.txt")
+}
+
+func saveJSON<T: Encodable>(_ value: T, to url: URL) throws {
+    let data = try JSONEncoder().encode(value)
+    try data.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+}
+
+func loadJSON<T: Decodable>(_ type: T.Type, from url: URL) throws -> T {
+    let data = try Data(contentsOf: url)
+    return try JSONDecoder().decode(type, from: data)
+}
+
+func openVPNExecutable() throws -> String {
+    let candidates = [
+        "/opt/homebrew/opt/openvpn/sbin/openvpn",
+        "/usr/local/opt/openvpn/sbin/openvpn",
+        "/opt/homebrew/sbin/openvpn",
+        "/usr/local/sbin/openvpn",
+        "/usr/sbin/openvpn",
+    ]
+
+    for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
+        return candidate
+    }
+
+    let result = try run("/usr/bin/which", ["openvpn"])
+    if result.status == 0 {
+        let path = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !path.isEmpty {
+            return path
+        }
+    }
+
+    throw CLIError.commandFailed("OpenVPN not found. Install it with: brew install openvpn")
+}
+
+func storeOpenVPNPassword(username: String, password: String) throws {
+    let result = try run("/usr/bin/security", [
+        "add-generic-password", "-U",
+        "-s", "nordvpn-macos-cli-openvpn",
+        "-a", username,
+        "-w", password,
+    ])
+    if result.status != 0 {
+        throw CLIError.commandFailed("Unable to store password in Keychain: \(result.output)")
+    }
+}
+
+func loadOpenVPNPassword(username: String) throws -> String {
+    let result = try run("/usr/bin/security", [
+        "find-generic-password",
+        "-s", "nordvpn-macos-cli-openvpn",
+        "-a", username,
+        "-w",
+    ])
+    if result.status != 0 {
+        throw CLIError.commandFailed("Unable to read password from Keychain. Re-run setup-openvpn for this username.")
+    }
+    return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func fetchNordVPNOpenVPNConfig(hostname: String, useTCP: Bool) throws -> String {
+    let proto = useTCP ? "tcp" : "udp"
+    let url = "https://downloads.nordcdn.com/configs/files/ovpn_\(proto)/servers/\(hostname).\(proto).ovpn"
+    let result = try run("/usr/bin/curl", ["-fsSL", url])
+    if result.status != 0 {
+        throw CLIError.commandFailed("Unable to download OpenVPN config for \(hostname): \(result.output)")
+    }
+    return result.output
+}
+
+func configuredOpenVPNConfig(_ config: String) throws -> String {
+    var lines = config.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    lines.removeAll { line in
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed == "auth-user-pass" || trimmed.hasPrefix("auth-user-pass ")
+    }
+    lines.append("auth-user-pass \"\(try openVPNAuthPath().path)\"")
+    lines.append("auth-nocache")
+    return lines.joined(separator: "\n") + "\n"
+}
+
+func fetchNordVPNServers(country: String, count: Int, technologyIdentifier: String = "ikev2") throws -> [NordVPNServer] {
     let key = normalizedCountryKey(country)
     guard let countryID = nordVPNCountryIDs[key] else {
         throw CLIError.invalidArgument("Unknown NordVPN country: \(country)")
@@ -463,7 +598,7 @@ func fetchNordVPNServers(country: String, count: Int) throws -> [NordVPNServer] 
     components.queryItems = [
         URLQueryItem(
             name: "filters",
-            value: "{\"country_id\":\(countryID),\"servers_technologies\":[{\"identifier\":\"ikev2\"}]}"
+            value: "{\"country_id\":\(countryID),\"servers_technologies\":[{\"identifier\":\"\(technologyIdentifier)\"}]}"
         ),
         URLQueryItem(name: "limit", value: String(count)),
     ]
@@ -493,7 +628,7 @@ func fetchNordVPNServers(country: String, count: Int) throws -> [NordVPNServer] 
     }
 
     if servers.count < count {
-        throw CLIError.commandFailed("Only found \(servers.count) IKEv2 server(s) for \(country).")
+        throw CLIError.commandFailed("Only found \(servers.count) \(technologyIdentifier) server(s) for \(country).")
     }
 
     return Array(servers.prefix(count))
@@ -600,6 +735,197 @@ func generateMobileconfig(country: String, args: [String]) throws {
     }
 }
 
+func setupOpenVPN(country: String, args: [String]) throws {
+    let count = try parseCount(args)
+    guard let username = try optionValue(args, option: "--username") else {
+        throw CLIError.missingArgument("Missing --username <NordVPN service username>.")
+    }
+
+    _ = try openVPNExecutable()
+    let password = try readPassword(hidden: !shouldReadPasswordFromStdin(args))
+    try storeOpenVPNPassword(username: username, password: password)
+
+    let useTCP = shouldUseTCP(args)
+    let servers = try fetchNordVPNServers(
+        country: country,
+        count: count,
+        technologyIdentifier: useTCP ? "openvpn_tcp" : "openvpn_udp"
+    )
+    let countryName = country.trimmingCharacters(in: .whitespacesAndNewlines)
+    let directory = try openVPNDirectory().appendingPathComponent(slug(countryName), isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+    var profiles: [OpenVPNProfile] = []
+    for (index, server) in servers.enumerated() {
+        let rawConfig = try fetchNordVPNOpenVPNConfig(hostname: server.hostname, useTCP: useTCP)
+        let config = try configuredOpenVPNConfig(rawConfig)
+        let profileName = "NordVPN \(countryName) \(index + 1)"
+        let configPath = directory.appendingPathComponent("\(slug(profileName)).ovpn")
+        try config.write(to: configPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configPath.path)
+
+        profiles.append(OpenVPNProfile(
+            name: profileName,
+            country: countryName,
+            hostname: server.hostname,
+            configPath: configPath.path,
+            username: username,
+            remoteIP: nil,
+            load: server.load
+        ))
+    }
+
+    try saveJSON(profiles, to: openVPNProfilesPath(country: countryName))
+    print("Saved \(profiles.count) OpenVPN profile(s) for \(countryName):")
+    for profile in profiles {
+        print("- \(profile.name): \(profile.hostname)")
+    }
+    print("Password stored in macOS Keychain for account: \(username)")
+    print("Rotate with: \(executableName) rotate-openvpn \"\(countryName)\" --ip")
+}
+
+func loadOpenVPNProfiles(country: String) throws -> [OpenVPNProfile] {
+    let countryName = country.trimmingCharacters(in: .whitespacesAndNewlines)
+    let path = try openVPNProfilesPath(country: countryName)
+    guard FileManager.default.fileExists(atPath: path.path) else {
+        throw CLIError.commandFailed("No OpenVPN profiles found for \(countryName). Run setup-openvpn first.")
+    }
+    return try loadJSON([OpenVPNProfile].self, from: path)
+}
+
+func currentOpenVPNState() throws -> OpenVPNState? {
+    let path = try openVPNStatePath()
+    guard FileManager.default.fileExists(atPath: path.path) else {
+        return nil
+    }
+    return try? loadJSON(OpenVPNState.self, from: path)
+}
+
+func processIsRunning(pid: Int32) -> Bool {
+    kill(pid, 0) == 0
+}
+
+func terminateOpenVPN(pid: Int32, signal: Int32) throws {
+    if kill(pid, signal) == 0 || errno == ESRCH {
+        return
+    }
+
+    if errno == EPERM {
+        let result = try run("/usr/bin/sudo", ["/bin/kill", "-\(signal)", String(pid)])
+        if result.status != 0 {
+            throw CLIError.commandFailed("Unable to stop OpenVPN process \(pid): \(result.output)")
+        }
+        return
+    }
+
+    throw CLIError.commandFailed("Unable to stop OpenVPN process \(pid).")
+}
+
+func stopOpenVPN(quiet: Bool = false) throws {
+    guard let state = try currentOpenVPNState() else {
+        if !quiet { print("No managed OpenVPN process found.") }
+        return
+    }
+
+    if processIsRunning(pid: state.pid) {
+        if !quiet { print("Stopping \(state.profileName) (pid \(state.pid))...") }
+        try terminateOpenVPN(pid: state.pid, signal: SIGTERM)
+        for _ in 0..<20 {
+            if !processIsRunning(pid: state.pid) { break }
+            usleep(250_000)
+        }
+        if processIsRunning(pid: state.pid) {
+            try terminateOpenVPN(pid: state.pid, signal: SIGKILL)
+        }
+    }
+
+    try? FileManager.default.removeItem(at: openVPNStatePath())
+}
+
+func statusOpenVPN() throws {
+    guard let state = try currentOpenVPNState() else {
+        print("Disconnected")
+        return
+    }
+
+    if processIsRunning(pid: state.pid) {
+        print("Connected or connecting: \(state.profileName) (\(state.hostname), pid \(state.pid))")
+    } else {
+        print("Stale state: \(state.profileName) pid \(state.pid) is not running")
+    }
+}
+
+func writeAuthFile(username: String) throws {
+    let password = try loadOpenVPNPassword(username: username)
+    let auth = "\(username)\n\(password)\n"
+    let path = try openVPNAuthPath()
+    try auth.write(to: path, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+}
+
+func rotateOpenVPN(country: String, args: [String]) throws {
+    let profiles = try loadOpenVPNProfiles(country: country)
+    guard let selected = profiles.randomElement() else {
+        throw CLIError.commandFailed("No OpenVPN profiles available for \(country).")
+    }
+
+    if shouldDryRun(args) {
+        print("Dry run: would stop current managed OpenVPN process.")
+        print("Dry run: would connect: \(selected.name) (\(selected.hostname))")
+        return
+    }
+
+    guard let username = try optionValue(args, option: "--username") else {
+        throw CLIError.missingArgument("Missing --username <NordVPN service username>.")
+    }
+
+    let openvpn = try openVPNExecutable()
+    try writeAuthFile(username: username)
+    try stopOpenVPN(quiet: true)
+
+    let waitSeconds = try parseWait(args, defaultWait: 10)
+    let logPath = URL(fileURLWithPath: "/tmp/nordvpn-macos-cli-openvpn.log")
+    let pidPath = URL(fileURLWithPath: "/tmp/nordvpn-macos-cli-openvpn.pid")
+    try? FileManager.default.removeItem(at: pidPath)
+
+    print("Connecting: \(selected.name) (\(selected.hostname))")
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+    process.arguments = [
+        openvpn,
+        "--config", selected.configPath,
+        "--daemon", "nordvpn-macos-cli",
+        "--writepid", pidPath.path,
+        "--log", logPath.path,
+    ]
+    try process.run()
+    process.waitUntilExit()
+
+    if process.terminationStatus != 0 {
+        throw CLIError.commandFailed("OpenVPN failed to start. Check log: \(logPath.path)")
+    }
+
+    sleep(waitSeconds)
+
+    let pidText = (try? String(contentsOf: pidPath, encoding: .utf8)) ?? ""
+    guard let pid = Int32(pidText.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        throw CLIError.commandFailed("OpenVPN process was not found after start. Check log: \(logPath.path)")
+    }
+
+    let state = OpenVPNState(
+        pid: pid,
+        profileName: selected.name,
+        country: selected.country,
+        hostname: selected.hostname,
+        startedAt: ISO8601DateFormatter().string(from: Date())
+    )
+    try saveJSON(state, to: openVPNStatePath())
+
+    print("Started: \(selected.name) (pid \(pid))")
+    try printPublicIPIfRequested(shouldPrintIP(args))
+}
+
+
 func main() throws {
     var args = Array(CommandLine.arguments.dropFirst())
 
@@ -653,6 +979,14 @@ func main() throws {
         )
     case "generate-mobileconfig":
         try generateMobileconfig(country: try requireCountry(args), args: args)
+    case "setup-openvpn":
+        try setupOpenVPN(country: try requireCountry(args), args: args)
+    case "rotate-openvpn":
+        try rotateOpenVPN(country: try requireCountry(args), args: args)
+    case "status-openvpn":
+        try statusOpenVPN()
+    case "stop-openvpn":
+        try stopOpenVPN()
     case "ip":
         print(try publicIP())
     default:
