@@ -1,246 +1,85 @@
 # nordvpn-macos-cli
 
-Command line control for NordVPN on macOS.
+Rotate your public IP on macOS using your NordVPN subscription from the command line.
 
-The tool downloads NordVPN OpenVPN configs, stores your NordVPN service password
-in macOS Keychain, and rotates between servers from Terminal.
+Built for AI agents, scrapers, and automation tools that need to change IPs
+programmatically without manual interaction.
 
-It can also install a narrow sudoers rule so AI agents, scraping scripts, cron
-jobs, and other automation tools can switch VPN IPs without manual password
-prompts.
-
-## Contents
-
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [AI agent install notes](#ai-agent-install-notes)
-- [NordVPN credentials](#nordvpn-credentials)
-- [Setup](#setup)
-- [Usage](#usage)
-- [Unattended rotation](#unattended-rotation)
-- [Commands](#commands)
-- [Shell aliases](#shell-aliases)
-- [Homebrew](#homebrew)
-- [Limitations](#limitations)
-- [Troubleshooting](#troubleshooting)
-- [Development](#development)
-- [Disclaimer](#disclaimer)
-- [License](#license)
-
-## Requirements
-
-- macOS 13 or newer.
-- Homebrew.
-- A NordVPN subscription.
-- NordVPN manual service credentials.
-
-OpenVPN is installed by Homebrew as a dependency of this package.
-
-## Installation
+## Quick start
 
 ```sh
 brew tap 3Vis3/tap
 brew install nordvpn-macos-cli
 ```
 
-Check the install:
-
-```sh
-nordvpn-macos help
-```
-
-Upgrade:
-
-```sh
-brew update
-brew upgrade nordvpn-macos-cli
-```
-
-<details id="ai-agent-install-notes">
-<summary>AI agent install notes</summary>
-
-Purpose: install and use `nordvpn-macos`, a Swift CLI for rotating NordVPN
-OpenVPN configs on macOS.
-
-NordVPN manual service credentials and server recommendations are available at:
+Get your NordVPN service credentials from:
 
 ```text
 https://my.nordaccount.com/dashboard/nordvpn/manual-configuration/server-recommendation/
 ```
 
-Do not ask for the user's normal Nord Account password. Use the service
-username and service password from the manual configuration page. The password
-is stored in macOS Keychain by `setup-openvpn`.
+Set up 5 servers for a country:
+
+```sh
+nordvpn-macos setup-openvpn Indonesia --count 5 --username YOUR_SERVICE_USERNAME
+```
+
+Enable passwordless rotation (asks for macOS password once):
+
+```sh
+nordvpn-macos install-sudoers
+```
+
+Rotate IP:
+
+```sh
+nordvpn-macos rotate-openvpn Indonesia --ip
+```
+
+That's it. No more password prompts. Your scripts and agents can now call
+`rotate-openvpn` whenever they need a new IP.
+
+<details>
+<summary>AI agent install notes</summary>
+
+Credentials page:
+
+```text
+https://my.nordaccount.com/dashboard/nordvpn/manual-configuration/server-recommendation/
+```
+
+Use the service username and service password from that page, not the normal
+Nord Account login.
 
 Install:
 
 ```sh
 brew tap 3Vis3/tap
 brew install nordvpn-macos-cli
-nordvpn-macos help
 ```
 
-Safe validation commands:
-
-```sh
-nordvpn-macos ip
-nordvpn-macos status-openvpn
-```
-
-Setup command:
+One-time setup:
 
 ```sh
 nordvpn-macos setup-openvpn Indonesia --count 5 --username NORD_SERVICE_USERNAME
-```
-
-Rotation command:
-
-```sh
-nordvpn-macos rotate-openvpn Indonesia --ip
-```
-
-Notes:
-
-- Tell the user VPN changes can interrupt active network connections.
-- `setup-openvpn` asks for the NordVPN service password.
-- `rotate-openvpn` does not need `--username`; it uses the username saved by setup.
-- `rotate-openvpn` may ask for the macOS admin password because OpenVPN needs sudo.
-- Use `install-sudoers` when an AI agent or automation tool needs to rotate IPs
-  without repeated macOS password prompts.
-- If `openvpn` is missing, run `brew install openvpn`.
-
-</details>
-
-## NordVPN credentials
-
-Get the service username, service password, and server recommendations from:
-
-```text
-https://my.nordaccount.com/dashboard/nordvpn/manual-configuration/server-recommendation/
-```
-
-Use the service username and service password from that page. They are not
-always the same as your normal Nord Account email and password.
-
-## Setup
-
-Set up five configs for a country:
-
-```sh
-nordvpn-macos setup-openvpn Indonesia \
-  --count 5 \
-  --username NORD_SERVICE_USERNAME
-```
-
-The command asks for the NordVPN service password and stores it in macOS
-Keychain. It stores OpenVPN config files under:
-
-```text
-~/Library/Application Support/nordvpn-macos-cli/openvpn/
-```
-
-Use TCP instead of UDP:
-
-```sh
-nordvpn-macos setup-openvpn Indonesia \
-  --count 5 \
-  --username NORD_SERVICE_USERNAME \
-  --tcp
-```
-
-## Usage
-
-Rotate to a random configured server in a country:
-
-```sh
-nordvpn-macos rotate-openvpn Indonesia --ip
-```
-
-Preview rotation without changing VPN state:
-
-```sh
-nordvpn-macos rotate-openvpn Indonesia --dry-run
-```
-
-Check the managed OpenVPN process:
-
-```sh
-nordvpn-macos status-openvpn
-```
-
-Stop the managed OpenVPN process:
-
-```sh
-nordvpn-macos stop-openvpn
-```
-
-Print current public IP:
-
-```sh
-nordvpn-macos ip
-```
-
-`rotate-openvpn` uses `sudo` because OpenVPN needs privileges to create the VPN
-tunnel interface and routes. If prompted, enter your macOS admin password, not
-your NordVPN password.
-
-## Unattended rotation
-
-`install-sudoers` is for AI agents, scraping workflows, cron jobs, launchd jobs,
-and other automation tools that need to switch VPN IPs using your NordVPN
-subscription without asking for the macOS password every time.
-
-Enable the optional sudoers rule:
-
-```sh
 nordvpn-macos install-sudoers
 ```
 
-This asks for macOS administrator approval once and installs:
-
-```text
-/etc/sudoers.d/nordvpn-macos-cli
-```
-
-The rule is limited to the Homebrew OpenVPN binary and `/bin/kill`. This lets
-`rotate-openvpn` start and stop the managed tunnel unattended. It does not grant
-broad passwordless sudo access.
-
-Preview the rule first:
-
-```sh
-nordvpn-macos install-sudoers --dry-run
-```
-
-Remove the rule:
-
-```sh
-nordvpn-macos uninstall-sudoers
-```
-
-Then use an AI agent, scheduler, or scraping script:
+After setup, rotate without prompts:
 
 ```sh
 nordvpn-macos rotate-openvpn Indonesia --ip
 ```
 
-Example cron entry for rotation every 10 minutes:
+Other commands:
 
-```cron
-*/10 * * * * /opt/homebrew/bin/nordvpn-macos rotate-openvpn Indonesia >/tmp/nordvpn-macos-rotate.log 2>&1
+```sh
+nordvpn-macos status-openvpn
+nordvpn-macos stop-openvpn
+nordvpn-macos ip
 ```
 
-Security note: passwordless sudo should be kept narrow. Do not grant broad
-`NOPASSWD: ALL` access.
-
-Use this only for accounts, devices, and websites you are authorized to access.
-Do not use IP rotation for abuse, evading bans, or bypassing rate limits.
-
-The generated sudoers rule looks like this on Apple Silicon Homebrew:
-
-```text
-%admin ALL=(root) NOPASSWD: /opt/homebrew/opt/openvpn/sbin/openvpn, /bin/kill
-```
+</details>
 
 ## Commands
 
@@ -254,98 +93,60 @@ nordvpn-macos uninstall-sudoers
 nordvpn-macos ip
 ```
 
-## Shell aliases
+## How it works
 
-Add aliases to `~/.zshrc`:
+1. `setup-openvpn` fetches NordVPN OpenVPN configs and stores your service
+   password in macOS Keychain.
+2. `install-sudoers` writes a narrow rule to `/etc/sudoers.d/nordvpn-macos-cli`
+   so OpenVPN can start without repeated password prompts. Only the Homebrew
+   OpenVPN binary and `/bin/kill` are allowed.
+3. `rotate-openvpn` stops the current tunnel, picks a random server config, and
+   starts a new connection. Returns the new public IP if `--ip` is passed.
 
-```sh
-alias vpn-id='nordvpn-macos rotate-openvpn Indonesia --ip'
-alias vpn-status='nordvpn-macos status-openvpn'
-alias vpn-off='nordvpn-macos stop-openvpn'
+## Automation examples
+
+From a Python scraper:
+
+```python
+import subprocess
+subprocess.run(["nordvpn-macos", "rotate-openvpn", "Indonesia", "--ip"])
 ```
 
-Reload the shell:
+Every 10 minutes with cron:
 
-```sh
-source ~/.zshrc
+```cron
+*/10 * * * * /opt/homebrew/bin/nordvpn-macos rotate-openvpn Indonesia >/tmp/nordvpn-rotate.log 2>&1
 ```
 
-## Homebrew
-
-Formula: `3Vis3/tap/nordvpn-macos-cli`
+Shell alias:
 
 ```sh
-brew tap 3Vis3/tap
-brew install nordvpn-macos-cli
+alias vpn-rotate='nordvpn-macos rotate-openvpn Indonesia --ip'
 ```
-
-## Limitations
-
-- This is not the official NordVPN CLI.
-- The NordVPN macOS app login is not used by this tool.
-- OpenVPN mode requires `sudo` to start and stop the VPN tunnel.
-- The tool only manages the OpenVPN process it starts.
-- Reconnecting the same server may return the same public IP.
 
 ## Troubleshooting
 
-### OpenVPN is missing
+**Rotate asks for a password** -- Run `nordvpn-macos install-sudoers` to enable
+unattended mode.
 
-```sh
-brew install openvpn
-```
+**Public IP does not change** -- Add more server configs:
+`nordvpn-macos setup-openvpn Indonesia --count 10 --username YOUR_SERVICE_USERNAME`
 
-### No OpenVPN profiles found
-
-Run setup first:
-
-```sh
-nordvpn-macos setup-openvpn Indonesia --count 5 --username NORD_SERVICE_USERNAME
-```
-
-### Rotate asks for a password
-
-That is the macOS admin password for `sudo`, not your NordVPN password.
-OpenVPN needs admin privileges to create the tunnel interface and routes.
-
-### Public IP does not change
-
-Set up more configs for the country and rotate again:
-
-```sh
-nordvpn-macos setup-openvpn Indonesia --count 10 --username NORD_SERVICE_USERNAME
-nordvpn-macos rotate-openvpn Indonesia --ip
-```
+**OpenVPN is missing** -- `brew install openvpn`
 
 ## Development
 
-Build:
-
 ```sh
 swift build
-```
-
-Build release:
-
-```sh
 swift build -c release
-```
-
-Run from source:
-
-```sh
 swift run nordvpn-macos help
-swift run nordvpn-macos status-openvpn
 ```
 
 ## Disclaimer
 
-This project is unofficial and is not affiliated with, endorsed by, sponsored
-by, or maintained by NordVPN. NordVPN is a trademark of its respective owner.
-
-Use this software only with accounts, devices, and networks you are authorized
-to use. VPN changes can interrupt active network connections.
+Unofficial. Not affiliated with NordVPN. Use only with accounts and services you
+are authorized to access.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT
