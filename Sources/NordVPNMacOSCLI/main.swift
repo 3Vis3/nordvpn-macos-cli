@@ -43,6 +43,7 @@ func printUsage() {
       \(executableName) reconnect-country <country> [--wait seconds] [--ip]
       \(executableName) rotate <vpn-name-1> <vpn-name-2> ... [--wait seconds] [--ip] [--dry-run]
       \(executableName) rotate-country <country> [--wait seconds] [--ip] [--dry-run]
+      \(executableName) generate-mobileconfig <country> --username <name> [--count n] [--output path] [--open] [--password-stdin]
       \(executableName) ip
 
     Examples:
@@ -52,6 +53,7 @@ func printUsage() {
       \(executableName) reconnect-country "United States" --ip
       \(executableName) rotate-country Germany --ip
       \(executableName) rotate-country Germany --dry-run
+      \(executableName) generate-mobileconfig Indonesia --count 5 --username your-service-user --open
       \(executableName) rotate "NordVPN Germany 1" "NordVPN Germany 2" --ip
 
     Notes:
@@ -133,12 +135,50 @@ func parseWait(_ args: [String], defaultWait: UInt32 = 5) throws -> UInt32 {
     return seconds
 }
 
+func optionValue(_ args: [String], option: String) throws -> String? {
+    guard let optionIndex = args.firstIndex(of: option) else {
+        return nil
+    }
+
+    let valueIndex = args.index(after: optionIndex)
+    guard valueIndex < args.endIndex else {
+        throw CLIError.missingArgument("Missing value after \(option).")
+    }
+
+    let value = args[valueIndex]
+    guard !value.hasPrefix("--") else {
+        throw CLIError.missingArgument("Missing value after \(option).")
+    }
+
+    return value
+}
+
+func parseCount(_ args: [String], defaultCount: Int = 5) throws -> Int {
+    guard let value = try optionValue(args, option: "--count") else {
+        return defaultCount
+    }
+
+    guard let count = Int(value), (1...20).contains(count) else {
+        throw CLIError.invalidArgument("--count must be a number between 1 and 20.")
+    }
+
+    return count
+}
+
 func shouldPrintIP(_ args: [String]) -> Bool {
     args.contains("--ip")
 }
 
 func shouldDryRun(_ args: [String]) -> Bool {
     args.contains("--dry-run")
+}
+
+func shouldOpen(_ args: [String]) -> Bool {
+    args.contains("--open")
+}
+
+func shouldReadPasswordFromStdin(_ args: [String]) -> Bool {
+    args.contains("--password-stdin")
 }
 
 func positionalArguments(_ args: [String]) throws -> [String] {
@@ -157,10 +197,15 @@ func positionalArguments(_ args: [String]) throws -> [String] {
             continue
         }
 
-        if value == "--wait" {
+        if value == "--open" || value == "--password-stdin" {
+            index = args.index(after: index)
+            continue
+        }
+
+        if ["--wait", "--count", "--username", "--output"].contains(value) {
             let nextIndex = args.index(after: index)
             guard nextIndex < args.endIndex else {
-                throw CLIError.missingArgument("Missing value after --wait.")
+                throw CLIError.missingArgument("Missing value after \(value).")
             }
             index = args.index(after: nextIndex)
             continue
@@ -356,6 +401,205 @@ func rotateCountry(_ country: String, waitSeconds: UInt32, printIP: Bool, dryRun
     try rotate(matches, waitSeconds: waitSeconds, printIP: printIP, dryRun: dryRun)
 }
 
+struct NordVPNServer {
+    let name: String
+    let hostname: String
+    let load: Int
+}
+
+let nordVPNCountryIDs: [String: Int] = [
+    "albania": 2, "algeria": 3, "andorra": 5, "argentina": 10, "armenia": 11,
+    "australia": 13, "austria": 14, "azerbaijan": 15, "bahamas": 16, "bangladesh": 18,
+    "belgium": 21, "belize": 22, "bermuda": 24, "bhutan": 25, "bolivia": 26,
+    "bosnia and herzegovina": 27, "brazil": 30, "brunei": 32, "bulgaria": 33,
+    "cambodia": 36, "canada": 38, "cayman islands": 40, "chile": 43, "colombia": 47,
+    "costa rica": 52, "croatia": 54, "cyprus": 56, "czech republic": 57,
+    "denmark": 58, "dominican republic": 61, "ecuador": 63, "egypt": 64,
+    "el salvador": 65, "estonia": 68, "finland": 73, "france": 74, "georgia": 80,
+    "germany": 81, "ghana": 82, "greece": 84, "greenland": 85, "guam": 88,
+    "guatemala": 89, "honduras": 96, "hong kong": 97, "hungary": 98, "iceland": 99,
+    "india": 100, "indonesia": 101, "ireland": 104, "israel": 105, "italy": 106,
+    "jamaica": 107, "japan": 108, "kazakhstan": 110, "kenya": 111, "laos": 118,
+    "latvia": 119, "lebanon": 120, "liechtenstein": 124, "lithuania": 125,
+    "luxembourg": 126, "malaysia": 131, "malta": 134, "mexico": 140, "moldova": 142,
+    "monaco": 143, "mongolia": 144, "montenegro": 146, "morocco": 147,
+    "myanmar": 149, "nepal": 152, "netherlands": 153, "new zealand": 156,
+    "nigeria": 159, "north macedonia": 128, "norway": 163, "pakistan": 165,
+    "panama": 168, "papua new guinea": 169, "paraguay": 170, "peru": 171,
+    "philippines": 172, "poland": 174, "portugal": 175, "puerto rico": 176,
+    "romania": 179, "serbia": 192, "singapore": 195, "slovakia": 196,
+    "slovenia": 197, "south africa": 200, "south korea": 114, "spain": 202,
+    "sri lanka": 203, "sweden": 208, "switzerland": 209, "thailand": 214,
+    "trinidad and tobago": 218, "turkey": 220, "ukraine": 225,
+    "united arab emirates": 226, "united kingdom": 227, "united states": 228,
+    "uruguay": 230, "uzbekistan": 231, "venezuela": 233, "vietnam": 234,
+]
+
+func normalizedCountryKey(_ country: String) -> String {
+    country
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+        .replacingOccurrences(of: "_", with: " ")
+}
+
+func slug(_ value: String) -> String {
+    let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-"))
+    return value
+        .lowercased()
+        .replacingOccurrences(of: " ", with: "-")
+        .unicodeScalars
+        .map { allowed.contains($0) ? String($0) : "-" }
+        .joined()
+        .replacingOccurrences(of: "--", with: "-")
+}
+
+func fetchNordVPNServers(country: String, count: Int) throws -> [NordVPNServer] {
+    let key = normalizedCountryKey(country)
+    guard let countryID = nordVPNCountryIDs[key] else {
+        throw CLIError.invalidArgument("Unknown NordVPN country: \(country)")
+    }
+
+    var components = URLComponents(string: "https://api.nordvpn.com/v1/servers/recommendations")!
+    components.queryItems = [
+        URLQueryItem(
+            name: "filters",
+            value: "{\"country_id\":\(countryID),\"servers_technologies\":[{\"identifier\":\"ikev2\"}]}"
+        ),
+        URLQueryItem(name: "limit", value: String(count)),
+    ]
+
+    guard let url = components.url else {
+        throw CLIError.commandFailed("Unable to build NordVPN API URL.")
+    }
+
+    let data: Data
+    do {
+        data = try Data(contentsOf: url)
+    } catch {
+        throw CLIError.commandFailed("Unable to fetch NordVPN server recommendations: \(error.localizedDescription)")
+    }
+
+    guard let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+        throw CLIError.commandFailed("Unable to parse NordVPN server recommendations.")
+    }
+
+    let servers = json.compactMap { item -> NordVPNServer? in
+        guard let hostname = item["hostname"] as? String,
+              let name = item["name"] as? String else {
+            return nil
+        }
+        let load = item["load"] as? Int ?? 0
+        return NordVPNServer(name: name, hostname: hostname, load: load)
+    }
+
+    if servers.count < count {
+        throw CLIError.commandFailed("Only found \(servers.count) IKEv2 server(s) for \(country).")
+    }
+
+    return Array(servers.prefix(count))
+}
+
+func readPassword(hidden: Bool) throws -> String {
+    var restoreEcho = false
+
+    if hidden {
+        print("NordVPN service password: ", terminator: "")
+        fflush(stdout)
+        _ = try? run("/bin/stty", ["-echo"])
+        restoreEcho = true
+    }
+
+    defer {
+        if restoreEcho {
+            _ = try? run("/bin/stty", ["echo"])
+            print("")
+        }
+    }
+
+    guard let password = readLine(), !password.isEmpty else {
+        throw CLIError.missingArgument("Missing NordVPN service password.")
+    }
+
+    return password
+}
+
+func generateMobileconfig(country: String, args: [String]) throws {
+    let count = try parseCount(args)
+    guard let username = try optionValue(args, option: "--username") else {
+        throw CLIError.missingArgument("Missing --username <NordVPN service username>.")
+    }
+
+    let password = try readPassword(hidden: !shouldReadPasswordFromStdin(args))
+    let servers = try fetchNordVPNServers(country: country, count: count)
+    let countryName = country.trimmingCharacters(in: .whitespacesAndNewlines)
+    let outputPath = try optionValue(args, option: "--output") ??
+        FileManager.default.currentDirectoryPath + "/nordvpn-\(slug(countryName))-\(count).mobileconfig"
+
+    var payloads: [[String: Any]] = []
+
+    for (index, server) in servers.enumerated() {
+        let profileName = "NordVPN \(countryName) \(index + 1)"
+        payloads.append([
+            "PayloadType": "com.apple.vpn.managed",
+            "PayloadVersion": 1,
+            "PayloadIdentifier": "com.trevislabs.nordvpn-macos-cli.vpn.\(slug(profileName))",
+            "PayloadUUID": UUID().uuidString.uppercased(),
+            "PayloadDisplayName": profileName,
+            "UserDefinedName": profileName,
+            "VPNType": "IKEv2",
+            "IKEv2": [
+                "RemoteAddress": server.hostname,
+                "RemoteIdentifier": server.hostname,
+                "LocalIdentifier": "",
+                "AuthenticationMethod": "None",
+                "ExtendedAuthEnabled": 1,
+                "AuthName": username,
+                "AuthPassword": password,
+                "DeadPeerDetectionRate": "Medium",
+                "DisconnectOnIdle": 0,
+                "DisableMOBIKE": 0,
+                "DisableRedirect": 0,
+                "EnableCertificateRevocationCheck": 0,
+                "EnablePFS": 0,
+                "UseConfigurationAttributeInternalIPSubnet": 0,
+            ],
+        ])
+    }
+
+    let profile: [String: Any] = [
+        "PayloadType": "Configuration",
+        "PayloadVersion": 1,
+        "PayloadIdentifier": "com.trevislabs.nordvpn-macos-cli.\(slug(countryName)).profiles",
+        "PayloadUUID": UUID().uuidString.uppercased(),
+        "PayloadDisplayName": "NordVPN \(countryName) CLI Profiles",
+        "PayloadDescription": "NordVPN IKEv2 profiles generated by nordvpn-macos-cli.",
+        "PayloadOrganization": "nordvpn-macos-cli",
+        "PayloadRemovalDisallowed": false,
+        "PayloadContent": payloads,
+    ]
+
+    let data = try PropertyListSerialization.data(
+        fromPropertyList: profile,
+        format: .xml,
+        options: 0
+    )
+
+    let url = URL(fileURLWithPath: outputPath)
+    try data.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: outputPath)
+
+    print("Wrote: \(outputPath)")
+    print("Generated profiles:")
+    for (index, server) in servers.enumerated() {
+        print("- NordVPN \(countryName) \(index + 1): \(server.hostname) (\(server.name), load \(server.load))")
+    }
+    print("Warning: this .mobileconfig contains the NordVPN service password. Delete it after installation.")
+
+    if shouldOpen(args) {
+        _ = try run("/usr/bin/open", [outputPath])
+    }
+}
+
 func main() throws {
     var args = Array(CommandLine.arguments.dropFirst())
 
@@ -407,6 +651,8 @@ func main() throws {
             printIP: shouldPrintIP(args),
             dryRun: shouldDryRun(args)
         )
+    case "generate-mobileconfig":
+        try generateMobileconfig(country: try requireCountry(args), args: args)
     case "ip":
         print(try publicIP())
     default:

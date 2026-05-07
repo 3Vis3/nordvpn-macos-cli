@@ -11,6 +11,7 @@ not control the NordVPN app and it does not store VPN credentials.
 - [Installation](#installation)
 - [AI agent install notes](#ai-agent-install-notes)
 - [NordVPN profile setup](#nordvpn-profile-setup)
+- [Automated profile generation](#automated-profile-generation)
 - [Usage](#usage)
 - [Shell aliases](#shell-aliases)
 - [Homebrew](#homebrew)
@@ -102,6 +103,7 @@ NordVPN <Country> 3
 Common commands:
 
 ```sh
+nordvpn-macos generate-mobileconfig Indonesia --count 5 --username NORD_SERVICE_USERNAME --open
 nordvpn-macos profiles Germany
 nordvpn-macos connect-country Germany --ip
 nordvpn-macos reconnect-country Germany --ip
@@ -118,6 +120,8 @@ Failure handling:
   the macOS VPN profile first.
 - Do not use third-party scripts that require plaintext NordVPN credentials
   unless the user explicitly accepts that risk.
+- If using `generate-mobileconfig`, tell the user the generated file contains
+  the NordVPN service password and should be deleted after installation.
 
 </details>
 
@@ -182,6 +186,69 @@ NordVPN Germany 3
 ```
 
 Country commands match the country text in the profile name.
+
+## Automated profile generation
+
+`generate-mobileconfig` creates an installable macOS configuration profile for
+multiple NordVPN IKEv2 servers in a country. It fetches recommended IKEv2
+servers from NordVPN, writes one VPN profile per server, and sets the profile
+authentication to username/password.
+
+Example for five Indonesia profiles:
+
+```sh
+nordvpn-macos generate-mobileconfig Indonesia \
+  --count 5 \
+  --username NORD_SERVICE_USERNAME \
+  --open
+```
+
+The command prompts for the NordVPN service password without echoing it. The
+service username and password come from:
+
+```text
+NordVPN -> Set up NordVPN manually -> Service credentials
+```
+
+The generated profiles are named:
+
+```text
+NordVPN Indonesia 1
+NordVPN Indonesia 2
+NordVPN Indonesia 3
+NordVPN Indonesia 4
+NordVPN Indonesia 5
+```
+
+The generated `.mobileconfig` contains the service password so macOS can import
+the profiles with username/password authentication instead of defaulting to
+certificate authentication. Delete the file after installation.
+
+To choose an output path:
+
+```sh
+nordvpn-macos generate-mobileconfig Indonesia \
+  --count 5 \
+  --username NORD_SERVICE_USERNAME \
+  --output ~/Desktop/nordvpn-indonesia.mobileconfig
+```
+
+For non-interactive scripts, pass the password on stdin:
+
+```sh
+printf '%s\n' "$NORDVPN_SERVICE_PASSWORD" | \
+  nordvpn-macos generate-mobileconfig Indonesia \
+    --count 5 \
+    --username "$NORDVPN_SERVICE_USERNAME" \
+    --password-stdin
+```
+
+After installing the profile in System Settings, verify:
+
+```sh
+nordvpn-macos profiles Indonesia
+nordvpn-macos rotate-country Indonesia --dry-run
+```
 
 ## Usage
 
@@ -287,6 +354,7 @@ nordvpn-macos reconnect <vpn-name> [--wait seconds] [--ip]
 nordvpn-macos reconnect-country <country> [--wait seconds] [--ip]
 nordvpn-macos rotate <vpn-name-1> <vpn-name-2> ... [--wait seconds] [--ip] [--dry-run]
 nordvpn-macos rotate-country <country> [--wait seconds] [--ip] [--dry-run]
+nordvpn-macos generate-mobileconfig <country> --username <name> [--count n] [--output path] [--open] [--password-stdin]
 nordvpn-macos ip
 ```
 
@@ -323,6 +391,7 @@ brew install nordvpn-macos-cli
 - Profiles must be created in macOS before this tool can control them.
 - Reconnecting the same profile may return the same public IP.
 - `scutil --nc` must be able to see the VPN profile.
+- Generated `.mobileconfig` files can contain the NordVPN service password.
 
 ## Troubleshooting
 
